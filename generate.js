@@ -1,20 +1,21 @@
 const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
+const moment = require('moment');
 
 // 配置参数
-const API_URL = 'https://task.952737.xyz/queryTasks?type=scheduled_js'; // 替换为实际API地址
+const API_URL = 'https://task.952737.xyz/queryTasks?type=scheduled_js&status=pending'; // 替换为实际API地址
 const OUTPUT_FILE = path.join(__dirname, 'execute.js');
 const RESULTS_FILE = path.join(__dirname, 'script-results.html');
 
 async function processScripts(scripts) {
   const stream = fs.createWriteStream(OUTPUT_FILE, { flags: 'w' });
-  
+
   // 写入文件头部
   stream.write(`// 自动生成的脚本文件\n`);
   stream.write(`// 生成时间: ${new Date().toISOString()}\n`);
   stream.write(`// 脚本总数: ${scripts.length}\n\n`);
-  
+
   // 创建共享上下文对象和结果存储
   stream.write(`// ===== 共享上下文和结果存储 =====\n`);
   stream.write(`const __context = {};\n`);
@@ -22,7 +23,7 @@ async function processScripts(scripts) {
   stream.write(`const fs = require('fs');\n`);
   stream.write(`const path = require('path');\n`);
   stream.write(`const RESULTS_FILE = ${JSON.stringify(RESULTS_FILE)};\n\n`);
-  
+
   // 添加执行函数
   stream.write(`// ===== 脚本执行器 =====\n`);
   stream.write(`async function __runScript(id, script) {\n`);
@@ -79,36 +80,36 @@ async function processScripts(scripts) {
   stream.write(`  }\n`);
   stream.write(`  return result;\n`);
   stream.write(`}\n\n`);
-  
+
   // 添加主执行逻辑
   stream.write(`// ===== 主执行流程 =====\n`);
   stream.write(`(async function main() {\n`);
   stream.write(`  try {\n`);
-  
+
   for (let i = 0; i < scripts.length; i++) {
     const script = scripts[i];
     const scriptId = i + 1;
-    
+
     try {
       // 添加脚本注释
       stream.write(`    // === 脚本 ${scriptId}/${scripts.length} ===\n`);
-      
+
       // 写入执行调用
       stream.write(`    await __runScript(${scriptId}, () => {\n`);
-      
+
       // 写入脚本内容（带缩进）
       const indentedScript = script.replace(/\n/g, '\n      ');
       stream.write(`      ${indentedScript}\n`);
-      
+
       stream.write(`    });\n\n`);
-      
+
       console.log(`✅ 脚本 ${scriptId}/${scripts.length} 写入成功`);
     } catch (error) {
       console.error(`❌ 脚本 ${scriptId}/${scripts.length} 写入失败:`, error.message);
       stream.write(`    // [错误] 脚本 ${scriptId} 写入失败: ${error.message}\n`);
     }
   }
-  
+
   // 结束主函数并保存结果为HTML
   stream.write(`    // 生成HTML报告\n`);
   stream.write(`    const resultsArray = Array.from(__results.values());\n`);
@@ -131,13 +132,13 @@ async function processScripts(scripts) {
   stream.write(`      'utf-8'\n`);
   stream.write(`    );\n`);
   stream.write(`    console.log(\`✅ 所有脚本执行完成，HTML报告已保存至: \${RESULTS_FILE}\`);\n`);
-  
+
   stream.write(`  } catch (error) {\n`);
   stream.write(`    console.error('全局错误:', error);\n`);
   stream.write(`    process.exit(1);\n`);
   stream.write(`  }\n`);
   stream.write(`})();\n\n`);
-  
+
   // 添加HTML生成函数
   stream.write(`// ===== HTML报告生成器 =====\n`);
   stream.write(`function generateHTMLReport(results) {\n`);
@@ -266,9 +267,9 @@ async function processScripts(scripts) {
   stream.write(`</html>\n`);
   stream.write(`  \`;\n`);
   stream.write(`}\n`);
-  
+
   stream.end();
-  
+
   return new Promise((resolve) => {
     stream.on('finish', () => {
       console.log(`\n脚本文件生成完成: ${OUTPUT_FILE}`);
@@ -285,26 +286,44 @@ async function main() {
       timeout: 10000,
       headers: { 'User-Agent': 'ScriptCombiner/1.0' }
     });
-    
+
     // 从response.data.result获取数据
     const data = response.data?.result || response.data;
-    
+
     if (!Array.isArray(data)) {
       throw new Error('API返回的数据不是有效列表');
     }
-    
+
+    const needUpdateStatusTask = [];
     // 过滤无效脚本
     const validScripts = data
+      .filter(it => {
+        if (it.frequency_type === 'daily') {
+          const deadline_at = JSON.parse(it.extra_data)?.deadline_at;
+          const flag = moment(deadline_at).isSameOrBefore(moment(), 'day');
+          if (flag) {
+            needUpdateStatusTask.push(it);
+          }
+          return !flag;
+        } else if (it.frequency_type === 'specific_date') {
+          const flag = moment(it.specific_date).isSame(moment(), 'day');
+          if (flag) {
+            needUpdateStatusTask.push(it);
+          }
+          return flag;
+        }
+        return true;
+      })
       .map(item => item.script)
       .filter(script => typeof script === 'string' && script.trim() !== '');
-    
-    console.log(`📥 获取到 ${data.length} 条记录，有效脚本 ${validScripts.length} 个`);
-    
+
+    console.log(`📥 获取到 ${data.length} 条记录，有效脚本 ${validScripts.length} 个`, needUpdateStatusTask);
+
     if (validScripts.length === 0) {
       console.log('⚠️ 没有有效脚本可处理');
       return;
     }
-    
+
     return processScripts(validScripts);
   } catch (error) {
     console.error('❌ 请求失败:', error.message);
