@@ -4,11 +4,12 @@ const path = require('path');
 const moment = require('moment');
 
 // 配置参数
-const API_URL = 'https://task.952737.xyz/queryTasks?type=scheduled_js&status=pending'; // 替换为实际API地址
+const API_URL = 'https://task.952737.xyz/queryTasks?type=scheduled_js&status=pending';
+const STATUS_API_URL = 'https://task.952737.xyz/updateTaskStatus';
 const OUTPUT_FILE = path.join(__dirname, 'execute.js');
 const RESULTS_FILE = path.join(__dirname, 'script-results.html');
 
-async function processScripts(scripts) {
+async function processScripts(scripts, needUpdateStatusTask) {
   const stream = fs.createWriteStream(OUTPUT_FILE, { flags: 'w' });
 
   // 写入文件头部
@@ -22,7 +23,10 @@ async function processScripts(scripts) {
   stream.write(`const __results = new Map(); // 使用Map存储结果\n`);
   stream.write(`const fs = require('fs');\n`);
   stream.write(`const path = require('path');\n`);
-  stream.write(`const RESULTS_FILE = ${JSON.stringify(RESULTS_FILE)};\n\n`);
+  stream.write(`const axios = require('axios');\n`);
+  stream.write(`const RESULTS_FILE = ${JSON.stringify(RESULTS_FILE)};\n`);
+  stream.write(`const needUpdateStatusTaskIds = ${JSON.stringify(needUpdateStatusTask.map(i => i.id))};\n`);
+  stream.write(`const STATUS_API_URL = ${JSON.stringify(STATUS_API_URL)};\n\n`);
 
   // 添加执行函数
   stream.write(`// ===== 脚本执行器 =====\n`);
@@ -87,15 +91,15 @@ async function processScripts(scripts) {
   stream.write(`  try {\n`);
 
   for (let i = 0; i < scripts.length; i++) {
-    const script = scripts[i];
-    const scriptId = i + 1;
+    const script = scripts[i]?.script;
+    const scriptId = scripts[i]?.id;
 
     try {
       // 添加脚本注释
-      stream.write(`    // === 脚本 ${scriptId}/${scripts.length} ===\n`);
+      stream.write(`    // === 脚本 ${scriptId} ===\n`);
 
       // 写入执行调用
-      stream.write(`    await __runScript(${scriptId}, () => {\n`);
+      stream.write(`    await __runScript('${scriptId}', () => {\n`);
 
       // 写入脚本内容（带缩进）
       const indentedScript = script.replace(/\n/g, '\n      ');
@@ -103,9 +107,9 @@ async function processScripts(scripts) {
 
       stream.write(`    });\n\n`);
 
-      console.log(`✅ 脚本 ${scriptId}/${scripts.length} 写入成功`);
+      console.log(`✅ 脚本 ${scriptId} 写入成功`);
     } catch (error) {
-      console.error(`❌ 脚本 ${scriptId}/${scripts.length} 写入失败:`, error.message);
+      console.error(`❌ 脚本 ${scriptId} 写入失败:`, error.message);
       stream.write(`    // [错误] 脚本 ${scriptId} 写入失败: ${error.message}\n`);
     }
   }
@@ -125,7 +129,13 @@ async function processScripts(scripts) {
   stream.write(`        subject: '脚本执行报告',\n`);
   stream.write(`        html: \`\${htmlContent}\`,\n`);
   stream.write(`      }),\n`);
-  stream.write(`    });\n`);
+  stream.write(`    });\n\n`);
+  stream.write(`    for (let i = 0; i < needUpdateStatusTaskIds.length; i++) {\n`);
+  stream.write(`      const taskId = needUpdateStatusTaskIds[i];\n`);
+  stream.write(`      const findItem = resultsArray.find(i => i.id === taskId);\n`);
+  stream.write(`      const status = findItem?.success ? 'completed' : 'failed';\n`);
+  stream.write(`      await updateTaskStatus(taskId, status);\n`);
+  stream.write(`    }\n\n`);
   stream.write(`    fs.writeFileSync(\n`);
   stream.write(`      RESULTS_FILE,\n`);
   stream.write(`      htmlContent,\n`);
@@ -138,6 +148,39 @@ async function processScripts(scripts) {
   stream.write(`    process.exit(1);\n`);
   stream.write(`  }\n`);
   stream.write(`})();\n\n`);
+
+  // 添加状态更新函数
+  stream.write(`// ===== 任务状态更新函数 =====\n`);
+  stream.write(`async function updateTaskStatus(id, status) {\n`);
+  stream.write(`  console.log(\`📤 正在更新任务状态: \${status}\, \${id}\`);\n`);
+  stream.write(`  try {\n`);
+  stream.write(`    const response = await axios.post(\n`);
+  stream.write(`      STATUS_API_URL,\n`);
+  stream.write(`      {\n`);
+  stream.write(`        id,\n`);
+  stream.write(`        status,\n`);
+  stream.write(`      },\n`);
+  stream.write(`      {\n`);
+  stream.write(`        headers: { 'Content-Type': 'application/json' },\n`);
+  stream.write(`        timeout: 10000\n`);
+  stream.write(`      }\n`);
+  stream.write(`    );\n`);
+  stream.write(`    \n`);
+  stream.write(`    if (response.data && response.data.success) {\n`);
+  stream.write(`      console.log(\`✅ 任务状态更新成功: \${status}\`);\n`);
+  stream.write(`      return true;\n`);
+  stream.write(`    } else {\n`);
+  stream.write(`      console.error('❌ 任务状态更新失败:', response.data);\n`);
+  stream.write(`      return false;\n`);
+  stream.write(`    }\n`);
+  stream.write(`  } catch (error) {\n`);
+  stream.write(`    console.error('❌ 任务状态更新请求失败:', error.message);\n`);
+  stream.write(`    if (error.response) {\n`);
+  stream.write(`      console.error('响应数据:', error.response.data);\n`);
+  stream.write(`    }\n`);
+  stream.write(`    return false;\n`);
+  stream.write(`  }\n`);
+  stream.write(`}\n\n`);
 
   // 添加HTML生成函数
   stream.write(`// ===== HTML报告生成器 =====\n`);
@@ -296,26 +339,23 @@ async function main() {
 
     const needUpdateStatusTask = [];
     // 过滤无效脚本
-    const validScripts = data
-      .filter(it => {
-        if (it.frequency_type === 'daily') {
-          const deadline_at = JSON.parse(it.extra_data)?.deadline_at;
-          const flag = moment(deadline_at).isSameOrBefore(moment(), 'day');
-          if (flag) {
-            needUpdateStatusTask.push(it);
-          }
-          return !flag;
-        } else if (it.frequency_type === 'specific_date') {
-          const flag = moment(it.specific_date).isSame(moment(), 'day');
-          if (flag) {
-            needUpdateStatusTask.push(it);
-          }
-          return flag;
+    const validScripts = data.filter(it => {
+      if (it.frequency_type === 'daily') {
+        const deadline_at = JSON.parse(it.extra_data)?.deadline_at;
+        const flag = moment(deadline_at).isSameOrBefore(moment(), 'day');
+        if (flag) {
+          needUpdateStatusTask.push(it);
         }
-        return true;
-      })
-      .map(item => item.script)
-      .filter(script => typeof script === 'string' && script.trim() !== '');
+        return !flag;
+      } else if (it.frequency_type === 'specific_date') {
+        const flag = moment(it.specific_date).isSame(moment(), 'day');
+        if (flag) {
+          needUpdateStatusTask.push(it);
+        }
+        return flag;
+      }
+      return true;
+    });
 
     console.log(`📥 获取到 ${data.length} 条记录，有效脚本 ${validScripts.length} 个`, needUpdateStatusTask);
 
@@ -324,7 +364,7 @@ async function main() {
       return;
     }
 
-    return processScripts(validScripts);
+    return processScripts(validScripts, needUpdateStatusTask);
   } catch (error) {
     console.error('❌ 请求失败:', error.message);
     if (error.response) {
